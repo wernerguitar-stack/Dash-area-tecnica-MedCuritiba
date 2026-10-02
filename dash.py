@@ -109,6 +109,7 @@ else:
       "Emissão Finalizada",
       "Entregue",
       "Concluído",
+      "Pendência",
   ]
   status_pgr = ["Vigente", "Em Elaboração", "A Vencer (30 dias)", "Vencido"]
   status_pcmso = ["Vigente", "Aguardando Exames", "A Vencer (30 dias)", "Vencido"]
@@ -157,9 +158,14 @@ else:
       "Data da Visita Tecnica": pd.date_range(
           start="2026-01-01", periods=n, freq="3D"
       ).strftime("%d/%m/%Y"),
-      "Data de fechamento": pd.date_range(
-          start="2026-01-15", periods=n, freq="4D"
-      ).strftime("%d/%m/%Y"),
+      "Data de fechamento": [
+          pd.date_range(start="2026-01-15", periods=n, freq="4D")[i].strftime(
+              "%d/%m/%Y"
+          )
+          if i % 3 != 0
+          else None
+          for i in range(n)
+      ],
       "PGR Vencimento": pd.date_range(
           start="2026-03-01", periods=n, freq="5D"
       ).strftime("%d/%m/%Y"),
@@ -220,24 +226,57 @@ col_empresa = get_col_name(
 )
 
 # -----------------------------------------------------------------------------
-# TRATAMENTO DE DATAS E CÁLCULO DE TEMPO EM DIAS (AGING)
+# TRATAMENTO DE DATAS E REGRA DE FECHAMENTO (INCLUINDO PENDÊNCIA)
 # -----------------------------------------------------------------------------
 if col_data_conclusao:
   df_raw["__Data_Conclusao_dt"] = pd.to_datetime(
       df_raw[col_data_conclusao], dayfirst=True, errors="coerce"
   )
-  df_raw["Mês Fechamento"] = df_raw["__Data_Conclusao_dt"].dt.strftime("%Y-%m")
-else:
-  df_raw["Mês Fechamento"] = None
 
 if col_data_visita:
   df_raw["__Data_Visita_dt"] = pd.to_datetime(
       df_raw[col_data_visita], dayfirst=True, errors="coerce"
   )
 
+# Identifica se a Fase do negócio é Pendência
+if col_fase:
+  is_pendencia = (
+      df_raw[col_fase]
+      .astype(str)
+      .str.contains("Pendên|Penden", case=False, na=False)
+  )
+else:
+  is_pendencia = pd.Series(False, index=df_raw.index)
+
+# Definição da Data Efetiva de Fechamento:
+# Se possui data de fechamento usa ela; se for fase Pendência e não tiver data de fechamento, usa a data de visita.
+if col_data_conclusao:
+  df_raw["__Data_Fechamento_Efetiva"] = df_raw["__Data_Conclusao_dt"]
+  if col_data_visita:
+    df_raw["__Data_Fechamento_Efetiva"] = df_raw[
+        "__Data_Fechamento_Efetiva"
+    ].fillna(df_raw["__Data_Visita_dt"].where(is_pendencia))
+  df_raw["Mês Fechamento"] = df_raw["__Data_Fechamento_Efetiva"].dt.strftime(
+      "%Y-%m"
+  )
+elif col_data_visita:
+  df_raw["__Data_Fechamento_Efetiva"] = df_raw["__Data_Visita_dt"].where(
+      is_pendencia
+  )
+  df_raw["Mês Fechamento"] = df_raw["__Data_Fechamento_Efetiva"].dt.strftime(
+      "%Y-%m"
+  )
+else:
+  df_raw["Mês Fechamento"] = None
+
+# Cálculo do Tempo em Dias (Aging)
 if col_data_visita:
   today = pd.Timestamp.now()
-  end_date = df_raw["__Data_Conclusao_dt"].fillna(today) if col_data_conclusao else today
+  end_date = (
+      df_raw["__Data_Fechamento_Efetiva"].fillna(today)
+      if "__Data_Fechamento_Efetiva" in df_raw.columns
+      else today
+  )
   df_raw["Tempo_Em_Dias"] = (end_date - df_raw["__Data_Visita_dt"]).dt.days
   df_raw["Tempo_Em_Dias"] = df_raw["Tempo_Em_Dias"].apply(
       lambda x: max(x, 0) if pd.notnull(x) else np.nan
@@ -274,7 +313,9 @@ st.sidebar.subheader("🔍 Filtros de Dados")
 df_filtered = df_raw.copy()
 
 if col_tecnico:
-  opts = ["Todos"] + sorted([str(x) for x in df_raw[col_tecnico].dropna().unique()])
+  opts = ["Todos"] + sorted(
+      [str(x) for x in df_raw[col_tecnico].dropna().unique()]
+  )
   sel = st.sidebar.selectbox("Técnico Responsável", opts)
   if sel != "Todos":
     df_filtered = df_filtered[df_filtered[col_tecnico].astype(str) == sel]
@@ -285,7 +326,7 @@ if col_mes:
   if sel != "Todos":
     df_filtered = df_filtered[df_filtered[col_mes].astype(str) == sel]
 
-if col_data_conclusao:
+if "Mês Fechamento" in df_raw.columns:
   opts_conc = ["Todos"] + sorted([
       str(x)
       for x in df_raw["Mês Fechamento"].dropna().unique()
@@ -293,13 +334,19 @@ if col_data_conclusao:
   ])
   sel_conc = st.sidebar.selectbox("Mês de Fechamento (AAAA-MM)", opts_conc)
   if sel_conc != "Todos":
-    df_filtered = df_filtered[df_filtered["Mês Fechamento"].astype(str) == sel_conc]
+    df_filtered = df_filtered[
+        df_filtered["Mês Fechamento"].astype(str) == sel_conc
+    ]
 
 if col_grau_empresa:
-  opts = ["Todos"] + sorted([str(x) for x in df_raw[col_grau_empresa].dropna().unique()])
+  opts = ["Todos"] + sorted(
+      [str(x) for x in df_raw[col_grau_empresa].dropna().unique()]
+  )
   sel = st.sidebar.selectbox("Grau de Risco da Empresa", opts)
   if sel != "Todos":
-    df_filtered = df_filtered[df_filtered[col_grau_empresa].astype(str) == sel]
+    df_filtered = df_filtered[
+        df_filtered[col_grau_empresa].astype(str) == sel
+    ]
 
 if col_fase:
   opts = sorted([str(x) for x in df_raw[col_fase].dropna().unique()])
@@ -311,13 +358,17 @@ if col_pgr_status:
   opts = sorted([str(x) for x in df_raw[col_pgr_status].dropna().unique()])
   sel = st.sidebar.multiselect("Status PGR", options=opts, default=[])
   if sel:
-    df_filtered = df_filtered[df_filtered[col_pgr_status].astype(str).isin(sel)]
+    df_filtered = df_filtered[
+        df_filtered[col_pgr_status].astype(str).isin(sel)
+    ]
 
 if col_pcmso_status:
   opts = sorted([str(x) for x in df_raw[col_pcmso_status].dropna().unique()])
   sel = st.sidebar.multiselect("Status PCMSO", options=opts, default=[])
   if sel:
-    df_filtered = df_filtered[df_filtered[col_pcmso_status].astype(str).isin(sel)]
+    df_filtered = df_filtered[
+        df_filtered[col_pcmso_status].astype(str).isin(sel)
+    ]
 
 # -----------------------------------------------------------------------------
 # CARDS DE MÉTRICAS (KPIs)
@@ -365,11 +416,12 @@ m5.metric("Tempo Médio (Aging)", tempo_medio)
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# GRÁFICOS PRINCIPAIS
+# GRÁFICOS PRINCIPAIS (FECHAMENTOS INCLUINDO PENDÊNCIAS)
 # -----------------------------------------------------------------------------
 st.subheader("📈 Fechamentos por Técnico de Segurança por Mês")
+st.caption("Inclui contratos com Data de Fechamento preenchida e negócios na fase 'Pendência'.")
 
-if col_tecnico and col_data_conclusao and not df_filtered.empty:
+if col_tecnico and "Mês Fechamento" in df_filtered.columns and not df_filtered.empty:
   df_conc = df_filtered.dropna(subset=["Mês Fechamento", col_tecnico])
   if not df_conc.empty:
     df_conc_grouped = (
@@ -397,9 +449,9 @@ if col_tecnico and col_data_conclusao and not df_filtered.empty:
     fig_conc_m.update_layout(height=380, margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig_conc_m, use_container_width=True)
   else:
-    st.info("Nenhum dado com data de fechamento para os filtros selecionados.")
+    st.info("Nenhum dado com fechamento/pendência para os filtros selecionados.")
 else:
-  st.info("Colunas de 'Data de fechamento' ou 'Técnico Responsável' não disponíveis.")
+  st.info("Colunas de Fechamento/Pendência ou Técnico Responsável não disponíveis.")
 
 st.markdown("---")
 
@@ -448,7 +500,10 @@ with g3:
   if col_pgr_status and col_pcmso_status and not df_filtered.empty:
     status_df = pd.DataFrame({
         "Documento": ["PGR"] * len(df_filtered) + ["PCMSO"] * len(df_filtered),
-        "Status": list(df_filtered[col_pgr_status]) + list(df_filtered[col_pcmso_status]),
+        "Status": (
+            list(df_filtered[col_pgr_status])
+            + list(df_filtered[col_pcmso_status])
+        ),
     })
     fig_status = px.histogram(
         status_df,
@@ -486,15 +541,34 @@ search_term = st.text_input("🔎 Buscar em qualquer campo da tabela:")
 df_display = df_filtered.copy()
 
 cols_to_remove = [
-    "Pipeline", "Negocio repetido", "disponivel para todos", "consulta repetida",
-    "etapa anterior", "observadores", "probalidade", "status do pagamento",
-    "status da entrega", "vinculo", "tipo", "fonte", "informaçoes da fonte",
-    "renda", "moeda", "informaçoe de sua empresa", "fechado", "__Data_Conclusao_dt",
-    "__Data_Visita_dt"
+    "Pipeline",
+    "Negocio repetido",
+    "disponivel para todos",
+    "consulta repetida",
+    "etapa anterior",
+    "observadores",
+    "probalidade",
+    "status do pagamento",
+    "status da entrega",
+    "vinculo",
+    "tipo",
+    "fonte",
+    "informaçoes da fonte",
+    "renda",
+    "moeda",
+    "informaçoe de sua empresa",
+    "fechado",
+    "__Data_Conclusao_dt",
+    "__Data_Visita_dt",
+    "__Data_Fechamento_Efetiva",
 ]
 
 cols_clean_map = {str(col).strip().lower(): col for col in df_display.columns}
-cols_actual_to_drop = [cols_clean_map[t.strip().lower()] for t in cols_to_remove if t.strip().lower() in cols_clean_map]
+cols_actual_to_drop = [
+    cols_clean_map[t.strip().lower()]
+    for t in cols_to_remove
+    if t.strip().lower() in cols_clean_map
+]
 
 if cols_actual_to_drop:
   df_display = df_display.drop(columns=cols_actual_to_drop)
@@ -509,89 +583,214 @@ if search_term:
 st.dataframe(df_display, use_container_width=True, height=300)
 
 # -----------------------------------------------------------------------------
-# MÓDULO DE IA OPENAI (CHATGPT)
+# MÓDULO DE IA OPENAI (CHATGPT): DIAGNÓSTICO + CAIXA DE PERGUNTAS LIVRES
 # -----------------------------------------------------------------------------
 st.markdown("---")
-st.subheader("🤖 Diagnóstico de IA (ChatGPT): Análise de Carga & Gargalos")
+st.subheader("🤖 Assistente de Inteligência Artificial (ChatGPT)")
 
-if st.button("🚀 Gerar Análise com Inteligência Artificial"):
-  if not openai_api_key_input:
-    st.error("⚠️ Insira uma Chave API válida da OpenAI na barra lateral para continuar (começa com sk-...).")
+tab_relatorio, tab_perguntas = st.tabs(
+    ["📊 Relatório de Diagnóstico", "💬 Fazer Pergunta para a IA"]
+)
+
+
+def preparar_contexto_dados():
+  """Monta um resumo estruturado em texto dos dados atualmente filtrados."""
+  if col_tecnico and not df_filtered.empty:
+    df_tst_group = df_filtered.groupby(col_tecnico)
+    carga_df = df_tst_group.size().reset_index(name="Total_Atendimentos")
+
+    if "Tempo_Em_Dias" in df_filtered.columns:
+      tempo_medio_tst = (
+          df_tst_group["Tempo_Em_Dias"]
+          .mean()
+          .round(1)
+          .reset_index(name="Tempo_Medio_Dias")
+      )
+      carga_df = pd.merge(carga_df, tempo_medio_tst, on=col_tecnico, how="left")
+
+    if col_grau_empresa:
+      grau_distrib = (
+          df_filtered.groupby([col_tecnico, col_grau_empresa])
+          .size()
+          .unstack(fill_value=0)
+          .reset_index()
+      )
+      carga_df = pd.merge(carga_df, grau_distrib, on=col_tecnico, how="left")
+
+    carga_tst = carga_df.to_json(orient="records")
   else:
-    with st.spinner("Analisando dados via ChatGPT (OpenAI)..."):
-      try:
-        # Preparação dos Dados
-        if col_tecnico and not df_filtered.empty:
-          df_tst_group = df_filtered.groupby(col_tecnico)
-          carga_df = df_tst_group.size().reset_index(name="Total_Atendimentos")
+    carga_tst = "{}"
 
-          if "Tempo_Em_Dias" in df_filtered.columns:
-            tempo_medio_tst = df_tst_group["Tempo_Em_Dias"].mean().round(1).reset_index(name="Tempo_Medio_Dias")
-            carga_df = pd.merge(carga_df, tempo_medio_tst, on=col_tecnico, how="left")
+  tempo_fase = "{}"
+  if col_fase and "Tempo_Em_Dias" in df_filtered.columns:
+    tempo_fase = (
+        df_filtered.groupby(col_fase)["Tempo_Em_Dias"]
+        .agg(["mean", "count"])
+        .reset_index()
+        .to_json(orient="records")
+    )
+  elif col_fase:
+    tempo_fase = (
+        df_filtered[col_fase].value_counts().reset_index().to_json(orient="records")
+    )
 
-          if col_grau_empresa:
-            grau_distrib = df_filtered.groupby([col_tecnico, col_grau_empresa]).size().unstack(fill_value=0).reset_index()
-            carga_df = pd.merge(carga_df, grau_distrib, on=col_tecnico, how="left")
+  resumo_geral = {
+      "total_empresas_filtradas": len(df_filtered),
+      "pgr_vencidos_ou_a_vencer": pgr_vencidos,
+      "pcmso_vencidos_ou_a_vencer": pcmso_vencidos,
+      "tecnicos_ativos": tecnicos_ativos,
+      "tempo_medio_dias": tempo_medio,
+      "regra_fechamento": "Considera fechado se possuir data de fechamento OU se estiver na fase 'Pendência'",
+  }
 
-          carga_tst = carga_df.to_json(orient="records")
-        else:
-          carga_tst = "{}"
+  cols_relevantes = [
+      c
+      for c in [
+          col_empresa,
+          col_tecnico,
+          col_fase,
+          col_pgr_status,
+          col_pcmso_status,
+      ]
+      if c in df_filtered.columns
+  ]
+  amostra_tabela = (
+      df_filtered[cols_relevantes].head(25).to_json(orient="records")
+      if cols_relevantes
+      else "{}"
+  )
 
-        tempo_fase = "{}"
-        if col_fase and "Tempo_Em_Dias" in df_filtered.columns:
-          tempo_fase = df_filtered.groupby(col_fase)["Tempo_Em_Dias"].agg(["mean", "count"]).reset_index().to_json(orient="records")
-        elif col_fase:
-          tempo_fase = df_filtered[col_fase].value_counts().reset_index().to_json(orient="records")
+  return f"""
+    ### RESUMO DOS FILTROS ATUAIS:
+    {resumo_geral}
 
-        resumo_geral = {
-            "total_empresas": len(df_filtered),
-            "pgr_vencidos_ou_a_vencer": pgr_vencidos,
-            "pcmso_vencidos_ou_a_vencer": pcmso_vencidos,
-        }
+    ### CARGA POR TÉCNICO:
+    {carga_tst}
 
-        prompt_user = f"""
-                Analise os dados extraídos do dashboard de SST/Engenharia de Processos e forneça um relatório estratégico e objetivo.
+    ### FASES DO PROCESSO & TEMPOS:
+    {tempo_fase}
 
-                ### DADOS DE RESUMO GERAL:
-                {resumo_geral}
+    ### AMOSTRA DOS DADOS EXIBIDOS (PRIMEIRAS 25 LINHAS):
+    {amostra_tabela}
+    """
 
-                ### DADOS DE CARGA POR TÉCNICO (TST):
-                {carga_tst}
 
-                ### DADOS DE TEMPO / CARDS POR FASE (GARGALOS DO PROCESSO):
-                {tempo_fase}
+# -----------------------------------------------------------------------------
+# ABA 1: RELATÓRIO AUTOMÁTICO
+# -----------------------------------------------------------------------------
+with tab_relatorio:
+  st.write(
+      "Clique no botão abaixo para gerar uma análise automatizada dos gargalos e"
+      " carga de trabalho."
+  )
+  if st.button("🚀 Gerar Análise Completa por IA"):
+    if not openai_api_key_input:
+      st.error(
+          "⚠️ Insira uma Chave API válida da OpenAI na barra lateral para"
+          " continuar (começa com sk-...)."
+      )
+    else:
+      with st.spinner("Analisando dados via ChatGPT (OpenAI)..."):
+        try:
+          contexto = preparar_contexto_dados()
+          prompt_user = f"""
+                    Analise os dados extraídos do dashboard de SST/Engenharia de Processos e forneça um relatório estratégico e objetivo.
+                    Nota: O indicador de Fechamento considera negócios concluídos e negócios na fase "Pendência".
 
-                ---
-                Estruture sua resposta estritamente em 3 seções Markdown:
-                1. **🚨 Análise do Gargalo do Processo (Aging)**
-                2. **⚖️ Avaliação de Carga por Técnico de Segurança**
-                3. **💡 Plano de Ação Recomendado (3 orientações práticas)**
-                """
+                    DADOS:
+                    {contexto}
 
-        # Inicialização do Cliente OpenAI
-        client = OpenAI(api_key=openai_api_key_input.strip())
+                    ---
+                    Estruture sua resposta estritamente em 3 seções Markdown:
+                    1. **🚨 Análise do Gargalo do Processo (Aging)**
+                    2. **⚖️ Avaliação de Carga por Técnico de Segurança**
+                    3. **💡 Plano de Ação Recomendado (3 orientações práticas)**
+                    """
 
-        # Chamada da API do ChatGPT
-        response = client.chat.completions.create(
-            model=openai_model_option,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Você é um consultor especialista em Segurança e Saúde"
-                        " no Trabalho (SST) e Engenharia de Processos."
-                    ),
-                },
-                {"role": "user", "content": prompt_user},
-            ],
-            temperature=0.7,
-        )
+          client = OpenAI(api_key=openai_api_key_input.strip())
+          response = client.chat.completions.create(
+              model=openai_model_option,
+              messages=[
+                  {
+                      "role": "system",
+                      "content": (
+                          "Você é um consultor especialista em Segurança e"
+                          " Saúde no Trabalho (SST) e Engenharia de Processos."
+                      ),
+                  },
+                  {"role": "user", "content": prompt_user},
+              ],
+              temperature=0.7,
+          )
 
-        analise_texto = response.choices[0].message.content
+          st.markdown("### 📋 Diagnóstico Gerencial")
+          st.info(response.choices[0].message.content)
 
-        st.markdown("### 📋 Diagnóstico Gerencial")
-        st.info(analise_texto)
+        except Exception as e:
+          st.error(f"❌ **Erro na API da OpenAI:** {e}")
 
-      except Exception as e:
-        err_msg = str(e)
-        st.error(f"❌ **Erro ao conectar com a API da OpenAI:** {err_msg}")
+
+# -----------------------------------------------------------------------------
+# ABA 2: CAIXA DE PERGUNTAS LIVRES (CHAT COM OS DADOS)
+# -----------------------------------------------------------------------------
+with tab_perguntas:
+  st.write("Digite qualquer dúvida ou pergunta sobre os dados filtrados na tela.")
+
+  with st.form(key="form_pergunta_ia"):
+    user_question = st.text_area(
+        "Sua Pergunta para a IA:",
+        placeholder=(
+            "Exemplo: Qual técnico está com o maior tempo médio? Quantas"
+            " pendências temos no total? Faça um resumo para a diretoria."
+        ),
+        height=100,
+    )
+    submit_button = st.form_submit_button(label="💬 Enviar Pergunta")
+
+  if submit_button:
+    if not openai_api_key_input:
+      st.error(
+          "⚠️ Insira a Chave API da OpenAI na barra lateral antes de perguntar."
+      )
+    elif not user_question.strip():
+      st.warning("⚠️ Escreva uma pergunta antes de enviar.")
+    else:
+      with st.spinner("Processando sua pergunta..."):
+        try:
+          contexto = preparar_contexto_dados()
+          prompt_custom = f"""
+                    Você é um analista de dados de SST altamente prestativo. Responda à pergunta do usuário com base EXCLUSIVAMENTE nos dados fornecidos abaixo.
+                    Nota: Negócios na fase "Pendência" são contabilizados como fechamento.
+
+                    ### CONTEXTO DOS DADOS FILTRADOS:
+                    {contexto}
+
+                    ---
+                    PERGUNTA DO USUÁRIO:
+                    {user_question}
+
+                    ---
+                    Responda de forma clara, direta e bem formatada (use negritos, tópicos ou tabelas se necessário).
+                    """
+
+          client = OpenAI(api_key=openai_api_key_input.strip())
+          response = client.chat.completions.create(
+              model=openai_model_option,
+              messages=[
+                  {
+                      "role": "system",
+                      "content": (
+                          "Você é um assistente virtual especialista em análise"
+                          " de dados de Segurança do Trabalho."
+                      ),
+                  },
+                  {"role": "user", "content": prompt_custom},
+              ],
+              temperature=0.5,
+          )
+
+          st.markdown("### 💡 Resposta da IA")
+          st.success(response.choices[0].message.content)
+
+        except Exception as e:
+          st.error(f"❌ **Erro ao processar pergunta:** {e}")
